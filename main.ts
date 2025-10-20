@@ -177,6 +177,7 @@ interface AgentConfig {
 export default class LettaPlugin extends Plugin {
 	settings: LettaPluginSettings;
 	agent: LettaAgent | null = null;
+	source: LettaSource | null = null;
 	statusBarItem: HTMLElement | null = null;
 	client: LettaClient | null = null;
 	lastAuthError: string | null = null;
@@ -278,6 +279,20 @@ export default class LettaPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "sync-vault-to-letta",
+			name: "Sync Vault",
+			callback: async () => {
+				if (!this.agent) {
+					new Notice(
+						"Please connect to the agent before syncing.",
+					);
+					return;
+				}
+				await this.syncVaultToLetta();
+			},
+		});
+
 		// Add settings tab
 		this.addSettingTab(new LettaSettingTab(this.app, this));
 
@@ -312,6 +327,7 @@ export default class LettaPlugin extends Plugin {
 			clearTimeout(this.focusUpdateTimer);
 		}
 		this.agent = null;
+		this.source = null;
 	}
 
 	async loadSettings() {
@@ -693,6 +709,9 @@ export default class LettaPlugin extends Plugin {
 					progressCallback?.("Loading agent configuration...");
 					await this.setupAgent();
 
+					// Attach source to agent
+					await this.setupSource();
+
 					// Setup focus block after agent is ready
 					if (this.agent) {
 						await this.ensureFocusBlock();
@@ -872,6 +891,140 @@ export default class LettaPlugin extends Plugin {
 			this.settings.agentName = "";
 			await this.saveSettings();
 			// Don't throw error to prevent blocking startup
+		}
+	}
+
+	async setupSource(): Promise<void> {
+		if (!this.agent || !this.client) {
+			new Notice("Please connect to an agent first.");
+			return;
+		}
+
+		// Use a default source name if not configured
+		if (!this.settings.sourceName) {
+			this.settings.sourceName = "obsidian-vault-files";
+			await this.saveSettings();
+		}
+
+		try {
+			// Check if source already exists
+			const sources = await this.client.sources.list();
+			let source = sources.find(
+				(s) => s.name === this.settings.sourceName,
+			);
+
+			if (!source) {
+				// Create source if it doesn't exist
+				source = await this.client.sources.create({
+					name: this.settings.sourceName,
+					description:
+						"A collection of markdown files from an Obsidian vault.",
+				});
+				new Notice(`Created new source: ${source.name}`);
+			}
+
+			this.source = { id: source.id, name: source.name };
+
+			// Attach source to agent
+			await this.client.agents.sources.attach(
+				this.agent.id,
+				this.source.id,
+			);
+			console.log(
+				`[Letta Plugin] Attached source ${this.source.id} to agent ${this.agent.id}`,
+			);
+		} catch (error) {
+			console.error("[Letta Plugin] Failed to setup source:", error);
+			new Notice(`Failed to setup source: ${error.message}`);
+		}
+	}
+
+	encodeFilePath(path: string): string {
+		return path.replace(/[\\/]/g, "__");
+	}
+
+	decodeFilePath(encodedPath: string): string {
+		return encodedPath.replace(/__/g, "/");
+	}
+
+	async syncVaultToLetta(): Promise<void> {
+		if (!this.source || !this.client) {
+			new Notice("Please connect to Letta and setup a source first.");
+			return;
+		}
+
+		try {
+			this.updateStatusBar("Syncing...");
+			new Notice("Starting vault sync...");
+
+			const vaultFiles = this.app.vault.getMarkdownFiles();
+			let uploadCount = 0;
+			let skipCount = 0;
+			let errorCount = 0;
+
+			// Create a queue for uploads
+			const uploadQueue = [];
+
+			for (const file of vaultFiles) {
+				uploadQueue.push(async () => {
+					try {
+						const content = await this.app.vault.read(file);
+						const encodedPath = this.encodeFilePath(file.path);
+
+						// Use client to upload
+						await this.client.sources.files.create(
+							this.source.id,
+							{
+								fileName: encodedPath,
+								content: content,
+							},
+						);
+						uploadCount++;
+					} catch (error) {
+						console.error(
+							`[Letta Plugin] Failed to upload file ${file.path}:`,
+							error,
+						);
+						errorCount++;
+					}
+				});
+			}
+
+			// Process queue with concurrency
+			const concurrencyLimit = 5;
+			let activeUploads = 0;
+			let currentIndex = 0;
+
+			const execute = async () => {
+				while (currentIndex < uploadQueue.length) {
+					if (activeUploads >= concurrencyLimit) {
+						await new Promise((resolve) => setTimeout(resolve, 100));
+						continue;
+					}
+
+					activeUploads++;
+					const task = uploadQueue[currentIndex++];
+					task().finally(() => {
+						activeUploads--;
+					});
+				}
+			};
+
+			await execute();
+
+			// Wait for all uploads to complete
+			while (activeUploads > 0) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+
+			this.updateStatusBar("Connected");
+			new Notice(
+				`Sync complete: ${uploadCount} files uploaded, ${errorCount} errors.`,
+			);
+		} catch (error) {
+			console.error("[Letta Plugin] Vault sync failed:", error);
+			this.updateStatusBar("Error");
+			new Notice(`Sync failed: ${error.message}`);
 		}
 	}
 
