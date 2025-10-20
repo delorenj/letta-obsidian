@@ -85,7 +85,7 @@ interface LettaPluginSettings {
 
 const DEFAULT_SETTINGS: LettaPluginSettings = {
 	lettaApiKey: "",
-	lettaBaseUrl: "https://api.letta.com",
+	lettaBaseUrl: "",
 	lettaProjectSlug: "", // No default project - will be determined by agent selection
 	agentId: "",
 	agentName: "Obsidian Assistant",
@@ -9026,7 +9026,7 @@ class LettaSettingTab extends PluginSettingTab {
 			.setDesc("Base URL for Letta API")
 			.addText((text) =>
 				text
-					.setPlaceholder("https://api.letta.com")
+					.setPlaceholder("Enter your Letta API URL")
 					.setValue(this.plugin.settings.lettaBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.lettaBaseUrl = value;
